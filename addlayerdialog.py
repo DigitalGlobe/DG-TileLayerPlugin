@@ -20,16 +20,21 @@
  ***************************************************************************/
 """
 from PyQt4.QtCore import QDir, QFile, QSettings
-from PyQt4.QtGui import QDialog, QHeaderView, QStandardItem, QStandardItemModel
+from PyQt4.QtGui import QDialog, QHeaderView, QStandardItem, QStandardItemModel, QMessageBox
 from qgis.core import QgsMessageLog
 from ui_addlayerdialog import Ui_Dialog
 import os
 import codecs
 from tiles import BoundingBox, TileLayerDefinition
+import urllib2
 
 debug_mode = 1
 
 class AddLayerDialog(QDialog):
+  def printMsg(self,msg):
+    self.setWindowTitle(msg)
+      # QMessageBox.information(self.iface.mainWindow(),"Debug",msg)
+
   def __init__(self, plugin):
     QDialog.__init__(self, plugin.iface.mainWindow())
     self.plugin = plugin
@@ -55,7 +60,10 @@ class AddLayerDialog(QDialog):
     self.serviceInfoList = []
     # import layer definitions from external layer definition directory, and append it into the tree
     extDir = QSettings().value("/TileLayerPlugin/extDir", "", type=unicode)
-    if extDir:
+    if extDir.startswith("http"):
+      self.importFromUrl(extDir)
+
+    elif extDir:
       self.importFromDirectory(extDir)
 
     # import layer definitions from TileLayerPlugin/layers directory, and append it into the tree
@@ -78,6 +86,17 @@ class AddLayerDialog(QDialog):
       if fileInfo.suffix().lower() == "tsv":
         self.importFromTsv(fileInfo.filePath())
 
+  def importFromUrl(self, url):
+    # load service info from tsv file
+    try:
+      response = urllib2.urlopen(url)
+      lines = response.read()
+      lines = lines.split('\n')
+    except Exception as e:
+      QgsMessageLog.logMessage(self.tr("Fail to read {0}: {1}").format(url, unicode(e)), self.tr("TileLayerPlugin"))
+      return False
+    self.importFromTsvUrl(lines)
+
   # Line Format is:
   # title attribution url [yOriginTop [zmin zmax [xmin ymin xmax ymax ]]]
   def importFromTsv(self, filename):
@@ -94,6 +113,50 @@ class AddLayerDialog(QDialog):
     except Exception as e:
       QgsMessageLog.logMessage(self.tr("Fail to read {0}: {1}").format(basename, unicode(e)), self.tr("TileLayerPlugin"))
       return False
+
+    for i, line in enumerate(lines):
+      if line.startswith("#"):
+        continue
+      vals = line.rstrip().split("\t")
+      nvals = len(vals)
+      try:
+        if nvals < 3:
+          raise
+        title, attribution, url = vals[0:3]
+        if not url:
+          raise
+        if nvals < 4:
+          serviceInfo = TileLayerDefinition(title, attribution, url)
+        else:
+          yOriginTop = int(vals[3])
+          if nvals < 6:
+            serviceInfo = TileLayerDefinition(title, attribution, url, yOriginTop)
+          else:
+            zmin, zmax = map(int, vals[4:6])
+            if nvals < 10:
+              serviceInfo = TileLayerDefinition(title, attribution, url, yOriginTop, zmin, zmax)
+            else:
+              bbox = BoundingBox.fromString(",".join(vals[6:10]))
+              serviceInfo = TileLayerDefinition(title, attribution, url, yOriginTop, zmin, zmax, bbox)
+      except:
+        QgsMessageLog.logMessage(self.tr("Invalid line format: {} line {}").format(basename, i + 1), self.tr("TileLayerPlugin"))
+        continue
+
+      # append the service info into the tree
+      vals = serviceInfo.toArrayForTreeView() + [len(self.serviceInfoList)]
+      rowItems = map(QStandardItem, map(unicode, vals))
+      parent.appendRow(rowItems)
+      self.serviceInfoList.append(serviceInfo)
+    return True
+
+  # Line Format is:
+  # title attribution url [yOriginTop [zmin zmax [xmin ymin xmax ymax ]]]
+  def importFromTsvUrl(self, lines):
+    # append file item
+    rootItem = self.model.invisibleRootItem()
+    basename = ""
+    parent = QStandardItem(os.path.splitext(basename)[0])
+    rootItem.appendRow([parent])
 
     for i, line in enumerate(lines):
       if line.startswith("#"):
